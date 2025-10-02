@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 import {
   Typography,
   Card,
-  Button,
+  IconButton,
   CardContent,
   CardMedia,
   Select,
@@ -10,39 +10,60 @@ import {
   Box,
   Container,
   CircularProgress,
+  Button,
   TextField,
-  Alert,
-  Snackbar,
-  styled,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  IconButton,
-} from '@mui/material';
+  Alert,
+  Snackbar,
+  styled,
+} from "@mui/material";
 import DeleteIcon from '@mui/icons-material/Delete';
 import CheckIcon from '@mui/icons-material/Check';
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-// 🛑 Asegúrate de que este path sea correcto para tu configuración de Firebase
-import { auth, db } from "../config/firebaseConfig";
+import { auth, db } from "../config/firebaseConfig"; // Asegúrate del path correcto
 import { onAuthStateChanged } from "firebase/auth";
 import { addDoc, collection, serverTimestamp, onSnapshot, query, orderBy, doc, deleteDoc } from "firebase/firestore";
 
-// --- CONSTANTES ---
+// --- CONSTANTES DE CONFIGURACIÓN ---
 const CLOUDINARY_UPLOAD_PRESET = "images";
-const CLOUDINARY_CLOUD_NAME = "dbiarx9tr";
-// Definiciones de colecciones de Firestore
+const CLOUDINARY_CLOUD_NAME = "dbiarx9tr"; // Tu Cloud Name
+// Colecciones de Firestore
 const FLORA_COLLECTION = "floraAprobada";
 const PENDING_COLLECTION = "floraPendiente";
 
-// ❌ Eliminamos API_URL ya que no queremos depender de la API externa
+// ⚠️ NECESARIO para borrar archivos de Cloudinary de forma segura.
+const API_URL = import.meta.env.VITE_API_URL;
 
 // --- ESTILOS ---
-// Puedes agregar estilos más avanzados si los necesitas, como en Fauna.jsx
 const StyledCard = styled(Card)({
   width: 200,
   position: "relative",
+  // Estilo añadido para mostrar descripción al pasar el ratón (como en Fauna)
+  "&:hover .description": {
+    maxHeight: "100px",
+    opacity: 1,
+  },
 });
+
+const DescriptionOverlay = styled(Box)({
+  backgroundColor: "rgba(0, 0, 0, 0.7)",
+  color: "white",
+  padding: "8px",
+  opacity: 0,
+  maxHeight: "0",
+  overflow: "hidden",
+  transition: "all 0.3s ease",
+  fontSize: "0.875rem",
+  textAlign: "center",
+  position: "absolute",
+  bottom: 0,
+  left: 0,
+  right: 0,
+});
+
 
 const Flora = () => {
   // --- Estados de la Vista Principal ---
@@ -93,6 +114,7 @@ const Flora = () => {
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setPlants(items);
+      // Recalcular categorías
       setCategories([...new Set(items.map((item) => item.category))]);
       setLoading(false);
     }, (err) => {
@@ -133,7 +155,7 @@ const Flora = () => {
       formData.append("file", file);
       formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
 
-      // 💥 RUTA ESPECÍFICA: upload/flora o pendientes/flora
+      // RUTA ESPECÍFICA: upload/flora o pendientes/flora
       const folderPath = role === "profesor" ? "upload/flora" : "pendientes/flora";
       formData.append("folder", folderPath);
 
@@ -149,17 +171,16 @@ const Flora = () => {
         name,
         category,
         description,
-        image: uploadData.secure_url, // URL de la imagen de Cloudinary
-        public_id: uploadData.public_id,
+        image: uploadData.secure_url, // URL de Cloudinary
+        public_id: uploadData.public_id, // 🔑 CLAVE para la eliminación
         createdAt: serverTimestamp(),
       };
 
       // 2. Guardar metadata en Firestore
+      const user = auth.currentUser;
       if (role === "estudiante") {
-        const user = auth.currentUser;
         await addDoc(collection(db, PENDING_COLLECTION), {
-          ...plantData, // Usa image como 'archivo' en la pendiente
-          archivo: uploadData.secure_url,
+          ...plantData,
           explorador: user.displayName || "Anónimo",
           correo: user.email,
         });
@@ -188,12 +209,12 @@ const Flora = () => {
   const handleApprove = async (item) => {
     setLoading(true);
     try {
-      // 1. Añadir a la colección principal
+      // 1. Añadir a la colección principal (usando los campos guardados)
       const approvedData = {
         name: item.name,
         category: item.category,
         description: item.description,
-        image: item.archivo, // Usa 'archivo' de la pendiente
+        image: item.image,
         public_id: item.public_id,
         createdAt: serverTimestamp(),
       };
@@ -211,23 +232,38 @@ const Flora = () => {
     }
   };
 
-  // Función para eliminar un item (de la lista principal o rechazar pendiente)
+  // 🗑️ FUNCIÓN DE ELIMINACIÓN COMPLETA (Firestore + Cloudinary via Backend)
   const handleDelete = async () => {
     if (!selectedItem) return;
 
-    const isPending = selectedItem.explorador; // Si tiene 'explorador', es de la cola de pendientes
+    // 1. Identificar la colección a eliminar
+    const isPending = pendingImages.some(item => item.id === selectedItem.id);
     const collectionRef = isPending ? PENDING_COLLECTION : FLORA_COLLECTION;
 
     setLoading(true);
     try {
-      // Borrar de Firestore (Aprobado o Pendiente)
+      const publicId = selectedItem.public_id;
+
+      // 2. Borrar el archivo de Cloudinary (si existe un public_id)
+      if (publicId) {
+        // 🚨 Llama a tu Backend con la clave secreta
+        const deleteResponse = await fetch(`${API_URL}/api/cloudinary/delete/${publicId}`, {
+          method: 'DELETE'
+        });
+
+        if (!deleteResponse.ok) {
+          console.warn("Advertencia: Fallo al borrar de Cloudinary. El registro de Firestore será borrado.");
+        }
+      }
+
+      // 3. Borrar de Firestore (Aprobado o Pendiente)
       await deleteDoc(doc(db, collectionRef, selectedItem.id));
 
       setDeleteDialog(false);
       setShowSuccess(true);
     } catch (error) {
       console.error('Error al eliminar:', error);
-      setError('Error al eliminar el item. Revisa los permisos de Firestore.');
+      setError('Error al eliminar el item. Revisa la conexión con tu backend y los permisos de Firestore.');
     } finally {
       setLoading(false);
       setSelectedItem(null);
@@ -352,7 +388,7 @@ const Flora = () => {
                 <CardMedia
                   component="img"
                   height="180"
-                  image={item.archivo}
+                  image={item.image} // Debe ser item.image si se guardó así en handleUpload
                   alt={item.name}
                 />
                 <CardContent>
@@ -419,6 +455,9 @@ const Flora = () => {
                   <Typography variant="caption" display="block" color="text.secondary" textAlign="center">
                     {plant.category}
                   </Typography>
+                  <DescriptionOverlay className="description">
+                    {plant.description}
+                  </DescriptionOverlay>
                 </CardContent>
                 {role === "profesor" && (
                   <IconButton
@@ -437,7 +476,7 @@ const Flora = () => {
       <Dialog open={deleteDialog} onClose={() => setDeleteDialog(false)}>
         <DialogTitle>Confirmar Eliminación</DialogTitle>
         <DialogContent>
-          ¿Estás seguro que deseas eliminar esta planta? Se borrará de la lista principal si está aprobada o de la cola de revisión si está pendiente.
+          ¿Estás seguro que deseas eliminar esta planta? Se borrará de la lista y se intentará **borrar el archivo permanente de Cloudinary** para evitar costos.
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDeleteDialog(false)}>Cancelar</Button>
@@ -446,7 +485,7 @@ const Flora = () => {
             color="error"
             disabled={loading}
           >
-            {selectedItem?.explorador ? 'Rechazar' : 'Eliminar'}
+            {selectedItem && pendingImages.some(item => item.id === selectedItem.id) ? 'Rechazar (Borrar)' : 'Eliminar'}
           </Button>
         </DialogActions>
       </Dialog>
